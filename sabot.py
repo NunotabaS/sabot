@@ -211,7 +211,7 @@ def play_game(explore_threshold = 10):
     
     if difficulty > 3:
         print("Entering boss game {} @ {} [BOSS]".format(zone, planet_name))
-        play_boss(zone_position)
+        play_boss(zone)
     else:
         low_difficulty_count = 0
         while low_difficulty_count < explore_threshold:
