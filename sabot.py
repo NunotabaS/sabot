@@ -31,11 +31,15 @@ class JoinZoneException(ApiException):
     """Exception with join_zone"""
     pass
 
+class PlayBossZoneException(ApiException):
+    """Exception with the boss"""
+    pass
+    
 class ReportScoreException(ApiException):
     """Exception with report_score"""
     pass
 
-SCORE_TABLE = [None, 600, 1200, 2400, 4800]
+SCORE_TABLE = [None, 600, 1200, 2400]
 RANDOMIZE = True
 
 s = requests.session()
@@ -63,10 +67,18 @@ def get_zone():
         info_json = info.json()
         for zone in info_json["response"]["planets"][0]["zones"]:
             if not zone["captured"] and zone["capture_progress"] < 0.9:
-                candidates.append((zone["difficulty"],
-                    random.random() if RANDOMIZE else 0,
-                    zone["zone_position"],
-                    (planet["id"], planet["state"]["name"])))
+                if zone["type"] == 4 and zone["boss_active"]:
+                    candidates.append((4,
+                        random.random() if RANDOMIZE else 0,
+                        zone["zone_position"],
+                        (planet["id"], planet["state"]["name"])))
+                else:
+                    candidates.append((zone["difficulty"],
+                        random.random() if RANDOMIZE else 0,
+                        zone["zone_position"],
+                        (planet["id"], planet["state"]["name"])))
+    if len(candidates) == 0:
+        raise GetZoneException('No zones available.')
     return sorted(candidates, reverse = True)[0]
 
 def get_user_info():
@@ -78,6 +90,9 @@ def get_user_info():
         current_zone = result.json()["response"]["active_zone_game"]
         print("Leaving zone {}".format(current_zone))
         leave_game(current_zone)
+    if "active_boss_game" in result.json()["response"]:
+        print("Leaving boss zone...")
+        leave_game(result.json()["response"]["active_boss_game"])
     if "active_planet" in result.json()["response"]:
         return result.json()["response"]["active_planet"]
     else:
@@ -135,14 +150,54 @@ def report_score(difficulty = 3):
         score_delta = int(res["next_level_score"]) - int(res["new_score"])
         eta_seconds = int(score_delta / score) * 110
         days, hours, minutes = eta_seconds / 86400, (eta_seconds % 86400) / 3600, (eta_seconds % 3600) / 60
-        print("Level: {} | Score: {} -> {} | Level up ETA: {}{:0>2}:{:0>2} {}".format(
+        print("Level: {} | Score: {} -> {} / {} | Level up ETA: {}{:0>2}:{:0>2} {}".format(
             res["new_level"],
             res["old_score"],
             res["new_score"],
+            res["next_level_score"],
             "{}d ".format(days) if days > 0 else "",
             hours,
             minutes,
             "Level UP!" if res["old_level"] != res["new_level"] else ""))
+
+def play_boss(zone):
+    data = {
+        'zone_position': zone,
+        'access_token': TOKEN
+    }
+    result = s.post("https://community.steam-api.com/ITerritoryControlMinigameService/JoinBossZone/v0001/", data=data)
+    if result.status_code != 200 or result.json() == {'response':{}}:
+        raise PlayBossZoneException("Status code: {}".format(result.status_code))
+    else:
+        heal_charge = 7
+        print("Joined boss zone: {}".format(zone))
+        while True:
+            sleep(5)
+            damage_data = {
+                'access_token': TOKEN,
+                'use_heal_ability': (heal_charge == 0),
+                'damage_to_boss': 100,
+                'damage_taken': 0
+            }
+            heal_charge = heal_charge - 1 if heal_charge > 0 else 7
+            result = s.post("https://community.steam-api.com/ITerritoryControlMinigameService/ReportBossDamage/v0001/", data=damage_data)
+            if result.status_code != 200 or result.json() == {'response':{}}:
+                print("Report boss score errored... retrying")
+                continue
+            res = result.json()["response"]
+            if res["waiting_for_players"]:
+                continue
+            if res["game_over"]:
+                break
+            print("Boss HP: {}/{} \n".format(
+                res["boss_status"]["boss_hp"],
+                res["boss_status"]["boss_max_hp"]))
+            for player in res["boss_status"]["boss_players"]:
+                print("Name: {} | HP: {}/{} | XP Earned: {}".format(
+                    player["name"],
+                    player["hp"],
+                    player["max_hp"],
+                    player["xp_earned"]))
 
 def play_game(explore_threshold = 10):
     current = get_user_info()
@@ -154,14 +209,18 @@ def play_game(explore_threshold = 10):
     planet_id, planet_name = planet
     join_planet(planet_id, planet_name)
     
-    low_difficulty_count = 0
-    while low_difficulty_count < explore_threshold:
-        low_difficulty_count = (low_difficulty_count + 1) if difficulty < 3 else 0
-        print("Joining zone {} @ {} with difficulty {}".format(zone, planet_name, difficulty))
-        join_zone(zone)
-        print("Sleeping for 1 minute 50 seconds")
-        sleep(110)
-        report_score(difficulty)
+    if difficulty > 3:
+        print("Entering boss game {} @ {} [BOSS]".format(zone, planet_name))
+        play_boss(zone_position)
+    else:
+        low_difficulty_count = 0
+        while low_difficulty_count < explore_threshold:
+            low_difficulty_count = (low_difficulty_count + 1) if difficulty < 3 else 0
+            print("Joining zone {} @ {} with difficulty {}".format(zone, planet_name, difficulty))
+            join_zone(zone)
+            print("Sleeping for 1 minute 50 seconds")
+            sleep(110)
+            report_score(difficulty)
 
 if __name__ == "__main__":
     while True:
@@ -173,6 +232,7 @@ if __name__ == "__main__":
             continue
         except KeyboardInterrupt:
             print("User cancelled script. Cleanup before exiting.")
+            get_user_info()
             exit(1)
         except Exception as e:
             print e
